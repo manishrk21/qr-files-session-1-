@@ -71,6 +71,10 @@ const STATUS_INDEX: Partial<Record<OrderStatus, number>> = {
   paid: 4,
 };
 
+// Orders can only be customer-cancelled before the kitchen starts preparing them —
+// matches CANCELLABLE_STATUSES in /api/orders/[orderId]/cancel/route.ts
+const CANCELLABLE_STATUSES: OrderStatus[] = ['pending', 'accepted'];
+
 export default function OrderTrackingPage() {
   const params = useParams<{ restaurantSlug: string; orderId: string }>();
   const router = useRouter();
@@ -78,6 +82,9 @@ export default function OrderTrackingPage() {
   const [order, setOrder] = useState<OrderData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/orders/${params.orderId}`)
@@ -102,6 +109,28 @@ export default function OrderTrackingPage() {
       setOrder((prev) => prev && { ...prev, status: realtimeState.status! });
     }
   }, [realtimeState.status]);
+
+  async function handleCancelRequest() {
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const res = await fetch(`/api/orders/${params.orderId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setOrder((prev) => prev && { ...prev, status: data.data.status });
+        setShowCancelConfirm(false);
+      } else {
+        // Surface the backend's specific reason (e.g. "kitchen already started preparing")
+        setCancelError(data.error?.message ?? 'Could not request cancellation');
+      }
+    } finally {
+      setCancelling(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -129,6 +158,7 @@ export default function OrderTrackingPage() {
   const isCancelled = currentStatus === 'cancelled' || currentStatus === 'cancel_requested';
   const isPaid = currentStatus === 'paid';
   const currentStep = STATUS_INDEX[currentStatus] ?? 0;
+  const canCancel = CANCELLABLE_STATUSES.includes(currentStatus);
 
   return (
     <main className="min-h-screen bg-gray-50 pb-16">
@@ -256,15 +286,24 @@ export default function OrderTrackingPage() {
           </div>
         )}
 
-        {/* Add more items CTA (only when pending/accepted) */}
-        {['pending', 'accepted'].includes(currentStatus) && (
-          <Link
-            href={`/r/${params.restaurantSlug}/menu`}
-            className="flex items-center justify-center gap-2 w-full border-2 border-dashed border-gray-200 rounded-2xl py-4 text-sm font-medium text-gray-500 hover:border-amber-300 hover:text-amber-600 transition"
-          >
-            <ShoppingBag size={16} />
-            Add more items
-          </Link>
+        {/* Add more items + cancel CTAs (only when pending/accepted) */}
+        {canCancel && (
+          <>
+            <Link
+              href={`/r/${params.restaurantSlug}/menu`}
+              className="flex items-center justify-center gap-2 w-full border-2 border-dashed border-gray-200 rounded-2xl py-4 text-sm font-medium text-gray-500 hover:border-amber-300 hover:text-amber-600 transition"
+            >
+              <ShoppingBag size={16} />
+              Add more items
+            </Link>
+
+            <button
+              onClick={() => setShowCancelConfirm(true)}
+              className="flex items-center justify-center w-full text-sm font-medium text-gray-400 hover:text-red-500 py-2 transition"
+            >
+              Cancel this order
+            </button>
+          </>
         )}
 
         {/* Back to menu */}
@@ -277,6 +316,37 @@ export default function OrderTrackingPage() {
           </Link>
         )}
       </div>
+
+      {/* Cancel confirmation modal */}
+      {showCancelConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl p-6 w-full max-w-sm">
+            <h2 className="font-bold text-gray-900 text-base mb-2">Cancel this order?</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              We'll ask the restaurant to confirm. If they've already started preparing
+              your food, they may not be able to cancel it.
+            </p>
+            {cancelError && (
+              <p className="text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2 mb-4">{cancelError}</p>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setShowCancelConfirm(false); setCancelError(null); }}
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm font-medium"
+              >
+                Keep order
+              </button>
+              <button
+                onClick={handleCancelRequest}
+                disabled={cancelling}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white text-sm font-semibold transition"
+              >
+                {cancelling ? 'Requesting…' : 'Yes, cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

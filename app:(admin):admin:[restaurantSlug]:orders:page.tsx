@@ -1,13 +1,14 @@
 'use client';
 // app/(admin)/admin/[restaurantSlug]/orders/page.tsx
-// Live orders board. Subscribes to Supabase Realtime for new_order events,
-// and allows inline status transitions via the state machine.
+// Live orders board. Subscribes to Supabase Realtime for new_order and
+// cancel_requested events, and allows inline status transitions via the state machine.
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import {
   Clock, CheckCircle, ChefHat, Bell, CreditCard,
-  RefreshCw, Filter, AlertCircle, Loader2,
+  RefreshCw, AlertCircle, Loader2, ClipboardList,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -94,28 +95,16 @@ export default function AdminOrdersPage() {
   const [showPaymentModal, setShowPaymentModal] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'upi' | 'card' | 'other'>('cash');
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const restaurantIdRef = useRef<string | null>(null);
 
   // ── Fetch orders ────────────────────────────────────────────────────────────
+  // Filtering by tab happens client-side below — the list endpoint always
+  // returns the latest page; for a high-volume kitchen this would move
+  // server-side via the `status` query param the route already supports.
   const fetchOrders = useCallback(async () => {
     try {
-      const statusParam = filter === 'active'
-        ? ACTIVE_STATUSES.join(',')
-        : filter === 'done'
-        ? DONE_STATUSES.join(',')
-        : '';
-
-      const url = `/api/admin/orders?limit=50${statusParam ? `&status=${filter === 'active' ? 'active' : ''}` : ''}`;
-      // Use list endpoint — fetch all for board view
       const res = await fetch('/api/admin/orders?limit=50');
       const data = await res.json();
-      if (data.success) {
-        setOrders(data.data.orders);
-        // Cache restaurant ID from first order (needed for realtime channel)
-        if (data.data.orders.length > 0 && !restaurantIdRef.current) {
-          // We get it from headers set by middleware — read from a meta endpoint
-        }
-      }
+      if (data.success) setOrders(data.data.orders);
     } finally {
       setLoading(false);
     }
@@ -125,12 +114,9 @@ export default function AdminOrdersPage() {
   const [restaurantId, setRestaurantId] = useState<string | null>(null);
 
   useEffect(() => {
-    // Fetch restaurant info via the public slug endpoint
     fetch(`/api/restaurants/${params.restaurantSlug}`)
       .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setRestaurantId(d.data.id);
-      });
+      .then((d) => { if (d.success) setRestaurantId(d.data.id); });
   }, [params.restaurantSlug]);
 
   useEffect(() => {
@@ -149,7 +135,14 @@ export default function AdminOrdersPage() {
           description: `₹${payload.payload.total}`,
           duration: 8000,
         });
-        // Play notification sound if available
+        audioRef.current?.play().catch(() => {});
+        fetchOrders();
+      })
+      .on('broadcast', { event: 'cancel_requested' }, (payload) => {
+        toast.warning('Cancellation requested', {
+          description: `Order #${String(payload.payload.orderId).slice(-8).toUpperCase()} — customer asked to cancel`,
+          duration: 10000,
+        });
         audioRef.current?.play().catch(() => {});
         fetchOrders();
       })
@@ -268,23 +261,27 @@ export default function AdminOrdersPage() {
             {filteredOrders.map((order) => {
               const transitions = STATUS_TRANSITIONS[order.status] ?? [];
               const isUpdating = updatingId === order.id;
+              const isUrgent = order.status === 'pending' || order.status === 'cancel_requested';
               return (
                 <div
                   key={order.id}
                   className={`bg-gray-900 border rounded-2xl p-4 flex flex-col gap-3 ${
-                    order.status === 'pending' ? 'border-amber-500/50' : 'border-gray-800'
+                    isUrgent ? 'border-amber-500/50' : 'border-gray-800'
                   }`}
                 >
-                  {/* Card header */}
+                  {/* Card header — clicking through goes to the detail page */}
                   <div className="flex items-start justify-between">
-                    <div>
-                      <p className="text-white font-bold text-base">
+                    <Link
+                      href={`/admin/${params.restaurantSlug}/orders/${order.id}`}
+                      className="group"
+                    >
+                      <p className="text-white font-bold text-base group-hover:text-amber-400 transition">
                         {order.table_label ?? 'Unknown Table'}
                       </p>
                       <p className="text-gray-500 text-xs mt-0.5">
                         #{order.id.slice(-8).toUpperCase()} · {elapsed(order.created_at)}
                       </p>
-                    </div>
+                    </Link>
                     <span
                       className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${STATUS_COLOR[order.status]}`}
                     >
@@ -347,6 +344,14 @@ export default function AdminOrdersPage() {
                       )}
                     </div>
                   )}
+
+                  {/* Detail link */}
+                  <Link
+                    href={`/admin/${params.restaurantSlug}/orders/${order.id}`}
+                    className="text-center text-xs text-gray-500 hover:text-amber-400 transition pt-1"
+                  >
+                    View full details →
+                  </Link>
                 </div>
               );
             })}
