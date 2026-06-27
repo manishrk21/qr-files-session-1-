@@ -1,365 +1,401 @@
-// app/(customer)/r/[restaurantSlug]/page.tsx
 'use client';
-import { useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { z } from 'zod';
+// app/(admin)/admin/[restaurantSlug]/orders/[orderId]/page.tsx
+// Full detail view for a single order. Linked from the live orders board.
+import { useEffect, useState, useCallback } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { toast } from 'sonner';
+import {
+  ArrowLeft, Loader2, User, Phone, CreditCard, Clock,
+  CheckCircle, AlertCircle, ChefHat, Bell,
+} from 'lucide-react';
+import type { OrderStatus } from '@/types/domain';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface TableInfo {
-  tableId: string;
-  tableLabel: string;
-  restaurantId: string;
-  restaurantSlug: string;
+interface OrderItem {
+  id: string;
+  item_name: string;
+  item_price: number;
+  item_food_type: 'veg' | 'non_veg' | 'egg';
+  quantity: number;
+  subtotal: number;
 }
 
-type Step = 'entry' | 'otp_mobile' | 'otp_code';
+interface OrderDetail {
+  orderId: string;
+  status: OrderStatus;
+  tableLabel: string | null;
+  customer: { name: string | null; mobileNumber: string | null; isGuest: boolean } | null;
+  items: OrderItem[];
+  summary: { subtotal: number; taxAmount: number; taxRate: number; total: number };
+  payment: { method: string | null; status: string };
+  specialInstructions: string | null;
+  notes: string | null;
+  statusHistory: { status: string; at: string }[];
+  createdAt: string;
+  updatedAt: string;
+}
 
-const MobileSchema = z.object({
-  mobile: z.string().regex(/^\+[1-9]\d{6,14}$/, 'Use E.164 format, e.g. +919876543210'),
-});
-const OtpSchema = z.object({ otp: z.string().length(6) });
+const STATUS_TRANSITIONS: Record<string, string[]> = {
+  pending:          ['accepted', 'cancelled'],
+  accepted:         ['preparing', 'cancelled'],
+  preparing:        ['ready'],
+  ready:            ['served'],
+  served:           ['paid'],
+  cancel_requested: ['cancelled', 'accepted'],
+};
 
-// ─── Component ────────────────────────────────────────────────────────────────
+const ACTION_LABEL: Record<string, string> = {
+  accepted:  'Accept',
+  preparing: 'Start Preparing',
+  ready:     'Mark Ready',
+  served:    'Mark Served',
+  paid:      'Mark Paid',
+  cancelled: 'Cancel Order',
+};
 
-export default function CustomerEntryPage({
-  params,
-}: {
-  params: { restaurantSlug: string };
-}) {
+const STATUS_COLOR: Record<string, string> = {
+  pending:          'bg-amber-500/20 text-amber-300 border-amber-500/30',
+  accepted:         'bg-blue-500/20 text-blue-300 border-blue-500/30',
+  preparing:        'bg-purple-500/20 text-purple-300 border-purple-500/30',
+  ready:            'bg-green-500/20 text-green-300 border-green-500/30',
+  served:           'bg-teal-500/20 text-teal-300 border-teal-500/30',
+  paid:             'bg-gray-500/20 text-gray-400 border-gray-500/30',
+  cancelled:        'bg-red-500/20 text-red-400 border-red-500/30',
+  cancel_requested: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
+};
+
+const STATUS_ICON: Record<string, React.ReactNode> = {
+  pending:  <Clock size={14} />,
+  accepted: <CheckCircle size={14} />,
+  preparing: <ChefHat size={14} />,
+  ready:    <Bell size={14} />,
+  served:   <CheckCircle size={14} />,
+  paid:     <CreditCard size={14} />,
+  cancel_requested: <AlertCircle size={14} />,
+};
+
+const FOOD_TYPE_DOT: Record<string, string> = {
+  veg:     'bg-green-500',
+  non_veg: 'bg-red-500',
+  egg:     'bg-yellow-500',
+};
+
+export default function AdminOrderDetailPage() {
+  const params = useParams<{ restaurantSlug: string; orderId: string }>();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const tableToken = searchParams.get('t') ?? '';
 
-  const [tableInfo, setTableInfo] = useState<TableInfo | null>(null);
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [step, setStep] = useState<Step>('entry');
-  const [mobile, setMobile] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [otpExpiry, setOtpExpiry] = useState(0); // seconds remaining
+  const [order, setOrder] = useState<OrderDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'upi' | 'card' | 'other'>('cash');
 
-  const mobileForm = useForm<z.infer<typeof MobileSchema>>({
-    resolver: zodResolver(MobileSchema),
-    defaultValues: { mobile: '' },
-  });
-  const otpForm = useForm<z.infer<typeof OtpSchema>>({
-    resolver: zodResolver(OtpSchema),
-    defaultValues: { otp: '' },
-  });
+  const fetchOrder = useCallback(async () => {
+    const res = await fetch(`/api/admin/orders/${params.orderId}`);
+    const data = await res.json();
+    if (data.success) {
+      setOrder(data.data);
+    } else {
+      toast.error(data.error?.message ?? 'Could not load order');
+    }
+    setLoading(false);
+  }, [params.orderId]);
 
-  // ── Verify table token on mount ──────────────────────────────────────────
-  useEffect(() => {
-    if (!tableToken) {
-      setTokenError('No table token found. Please scan the QR code again.');
+  useEffect(() => { fetchOrder(); }, [fetchOrder]);
+
+  async function handleTransition(newStatus: string) {
+    if (newStatus === 'paid') {
+      setShowPaymentModal(true);
       return;
     }
-    fetch(`/api/restaurants/${params.restaurantSlug}/table/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: tableToken }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success) setTableInfo(data.data);
-        else setTokenError('Invalid or expired QR code. Please scan again.');
-      })
-      .catch(() => setTokenError('Network error. Please try again.'));
-  }, [tableToken, params.restaurantSlug]);
-
-  // ── OTP countdown ────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (otpExpiry <= 0) return;
-    const t = setInterval(() => setOtpExpiry((s) => Math.max(0, s - 1)), 1000);
-    return () => clearInterval(t);
-  }, [otpExpiry]);
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
-
-  async function handleSendOtp(values: z.infer<typeof MobileSchema>) {
-    if (!tableInfo) return;
-    setLoading(true);
-    try {
-      const res = await fetch('/api/auth/otp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mobileNumber: values.mobile, restaurantId: tableInfo.restaurantId }),
-      });
-      const data = await res.json();
-      if (!data.success) {
-        toast.error(data.error?.message ?? 'Failed to send OTP');
-        return;
-      }
-      setMobile(values.mobile);
-      setOtpExpiry(data.data.expiresInSeconds);
-      setStep('otp_code');
-      toast.success(`OTP sent to ${data.data.maskedMobile}`);
-    } finally {
-      setLoading(false);
-    }
+    await doTransition(newStatus);
   }
 
-  async function handleVerifyOtp(values: z.infer<typeof OtpSchema>) {
-    if (!tableInfo) return;
-    setLoading(true);
+  async function doTransition(newStatus: string, method?: string) {
+    setUpdating(true);
     try {
-      const res = await fetch('/api/auth/otp/verify', {
-        method: 'POST',
+      const res = await fetch(`/api/admin/orders/${params.orderId}/status`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mobileNumber: mobile,
-          otp: values.otp,
-          restaurantId: tableInfo.restaurantId,
-          tableToken,
+          status: newStatus,
+          ...(method ? { paymentMethod: method } : {}),
         }),
       });
       const data = await res.json();
-      if (!data.success) {
-        const remaining = data.error?.details?.attemptsRemaining;
-        toast.error(
-          remaining != null
-            ? `Incorrect OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-            : data.error?.message ?? 'Invalid OTP',
-        );
-        return;
-      }
-      router.push(data.data.redirectTo);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleGoogleLogin() {
-    if (!tableInfo) return;
-    // Load Google Identity Services script
-    const { google } = window as any;
-    if (!google?.accounts?.id) {
-      toast.error('Google login is not available. Please try another method.');
-      return;
-    }
-    google.accounts.id.initialize({
-      client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID,
-      callback: async (response: { credential: string }) => {
-        setLoading(true);
-        try {
-          const res = await fetch('/api/auth/google', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              idToken: response.credential,
-              restaurantId: tableInfo.restaurantId,
-              tableToken,
-            }),
-          });
-          const data = await res.json();
-          if (data.success) {
-            router.push(data.data.redirectTo);
-          } else {
-            toast.error(data.error?.message ?? 'Google login failed');
-          }
-        } finally {
-          setLoading(false);
-        }
-      },
-    });
-    google.accounts.id.prompt();
-  }
-
-  async function handleGuestLogin() {
-    if (!tableInfo) return;
-    setLoading(true);
-    try {
-      const res = await fetch('/api/auth/guest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ restaurantId: tableInfo.restaurantId, tableToken }),
-      });
-      const data = await res.json();
       if (data.success) {
-        router.push(data.data.redirectTo);
+        toast.success(`Order marked as ${newStatus.replace('_', ' ')}`);
+        fetchOrder();
       } else {
-        toast.error(data.error?.message ?? 'Could not start guest session');
+        toast.error(data.error?.message ?? 'Status update failed');
       }
     } finally {
-      setLoading(false);
+      setUpdating(false);
+      setShowPaymentModal(false);
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  function elapsed(iso: string) {
+    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (diff < 60) return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return `${Math.floor(diff / 3600)}h ago`;
+  }
 
-  if (tokenError) {
+  function formatDateTime(iso: string) {
+    return new Date(iso).toLocaleString('en-IN', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  }
+
+  if (loading) {
     return (
-      <main className="min-h-screen flex items-center justify-center p-6">
-        <div className="max-w-sm w-full text-center space-y-4">
-          <div className="text-4xl">⚠️</div>
-          <h1 className="text-xl font-semibold">Invalid QR Code</h1>
-          <p className="text-gray-500 text-sm">{tokenError}</p>
-        </div>
-      </main>
+      <div className="flex items-center justify-center h-full p-12">
+        <Loader2 size={32} className="text-amber-500 animate-spin" />
+      </div>
     );
   }
 
-  if (!tableInfo) {
+  if (!order) {
     return (
-      <main className="min-h-screen flex items-center justify-center">
-        <div className="animate-pulse text-gray-400 text-sm">Verifying table…</div>
-      </main>
+      <div className="p-6">
+        <p className="text-gray-400 mb-4">Order not found.</p>
+        <Link
+          href={`/admin/${params.restaurantSlug}/orders`}
+          className="text-amber-400 text-sm underline"
+        >
+          ← Back to orders
+        </Link>
+      </div>
     );
   }
+
+  const transitions = STATUS_TRANSITIONS[order.status] ?? [];
+  const isTerminal = ['paid', 'cancelled'].includes(order.status);
 
   return (
-    <>
-      {/* Load Google Identity Services */}
-      <script src="https://accounts.google.com/gsi/client" async defer />
+    <div className="p-6 max-w-4xl">
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-6">
+        <button
+          onClick={() => router.push(`/admin/${params.restaurantSlug}/orders`)}
+          className="text-gray-400 hover:text-gray-200 transition"
+        >
+          <ArrowLeft size={20} />
+        </button>
+        <div className="flex-1 min-w-0">
+          <h1 className="text-xl font-bold text-white truncate">
+            {order.tableLabel ?? 'Unknown Table'}
+          </h1>
+          <p className="text-gray-500 text-xs mt-0.5">
+            #{order.orderId.slice(-8).toUpperCase()} · placed {elapsed(order.createdAt)}
+          </p>
+        </div>
+        <span
+          className={`text-xs font-semibold px-3 py-1.5 rounded-full border flex items-center gap-1.5 flex-shrink-0 ${STATUS_COLOR[order.status] ?? 'bg-gray-500/20 text-gray-400 border-gray-500/30'}`}
+        >
+          {STATUS_ICON[order.status]}
+          {order.status.replace('_', ' ')}
+        </span>
+      </div>
 
-      <main className="min-h-screen flex items-center justify-center p-6 bg-gray-50">
-        <div className="w-full max-w-sm space-y-6">
-          {/* Header */}
-          <div className="text-center space-y-1">
-            <p className="text-xs font-medium uppercase tracking-widest text-gray-400">
-              {tableInfo.tableLabel}
-            </p>
-            <h1 className="text-2xl font-bold text-gray-900">Welcome</h1>
-            <p className="text-sm text-gray-500">Choose how you'd like to continue</p>
+      <div className="grid md:grid-cols-3 gap-5">
+        {/* Left column */}
+        <div className="md:col-span-2 space-y-5">
+
+          {/* Order items */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <h2 className="text-white font-semibold text-sm mb-4">Order Items</h2>
+            <div className="space-y-3">
+              {order.items.map((item) => (
+                <div key={item.id} className="flex items-center gap-3">
+                  <span className={`w-2.5 h-2.5 rounded-sm flex-shrink-0 ${FOOD_TYPE_DOT[item.item_food_type] ?? 'bg-gray-500'}`} />
+                  <span className="text-gray-500 text-sm w-5 flex-shrink-0">{item.quantity}×</span>
+                  <span className="text-gray-300 text-sm flex-1">{item.item_name}</span>
+                  <span className="text-gray-400 text-sm">₹{Number(item.subtotal).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 pt-4 border-t border-gray-800 space-y-1.5">
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Subtotal</span>
+                <span>₹{Number(order.summary.subtotal).toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Tax ({order.summary.taxRate}%)</span>
+                <span>₹{Number(order.summary.taxAmount).toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between text-base font-bold text-white pt-1.5 border-t border-gray-800">
+                <span>Total</span>
+                <span>₹{Number(order.summary.total).toFixed(2)}</span>
+              </div>
+            </div>
           </div>
 
-          {step === 'entry' && (
-            <div className="space-y-3">
-              {/* Google */}
-              <button
-                onClick={handleGoogleLogin}
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-3 border border-gray-300 rounded-xl py-3 px-4 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition"
-              >
-                <GoogleIcon />
-                Continue with Google
-              </button>
-
-              {/* Mobile OTP */}
-              <button
-                onClick={() => setStep('otp_mobile')}
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-3 border border-gray-300 rounded-xl py-3 px-4 bg-white text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition"
-              >
-                <span>📱</span>
-                Continue with Mobile OTP
-              </button>
-
-              <div className="flex items-center gap-3 py-1">
-                <div className="flex-1 h-px bg-gray-200" />
-                <span className="text-xs text-gray-400">or</span>
-                <div className="flex-1 h-px bg-gray-200" />
+          {/* Special instructions */}
+          {order.specialInstructions && (
+            <div className="bg-amber-900/20 border border-amber-800/40 rounded-2xl p-4 flex gap-3">
+              <AlertCircle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-medium text-amber-300 mb-1">Special Instructions</p>
+                <p className="text-sm text-amber-200">{order.specialInstructions}</p>
               </div>
-
-              {/* Guest */}
-              <button
-                onClick={handleGuestLogin}
-                disabled={loading}
-                className="w-full text-sm text-gray-500 hover:text-gray-700 py-2 transition"
-              >
-                Continue as Guest
-              </button>
-              <p className="text-xs text-center text-gray-400">
-                Guest sessions expire in 24 hours and don't earn loyalty rewards
-              </p>
             </div>
           )}
 
-          {step === 'otp_mobile' && (
-            <form onSubmit={mobileForm.handleSubmit(handleSendOtp)} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Mobile Number
-                </label>
-                <input
-                  {...mobileForm.register('mobile')}
-                  type="tel"
-                  placeholder="+919876543210"
-                  className="w-full border border-gray-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
-                />
-                {mobileForm.formState.errors.mobile && (
-                  <p className="text-xs text-red-500 mt-1">
-                    {mobileForm.formState.errors.mobile.message}
-                  </p>
-                )}
-              </div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-gray-900 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-50"
-              >
-                {loading ? 'Sending…' : 'Send OTP'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setStep('entry')}
-                className="w-full text-sm text-gray-500 py-1"
-              >
-                ← Back
-              </button>
-            </form>
+          {/* Internal notes */}
+          {order.notes && (
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-4">
+              <p className="text-xs font-medium text-gray-400 mb-1">Internal Notes</p>
+              <p className="text-sm text-gray-300 whitespace-pre-line">{order.notes}</p>
+            </div>
           )}
 
-          {step === 'otp_code' && (
-            <form onSubmit={otpForm.handleSubmit(handleVerifyOtp)} className="space-y-4">
-              <p className="text-sm text-gray-500 text-center">
-                Enter the 6-digit code sent to{' '}
-                <span className="font-medium text-gray-900">{mobile}</span>
-              </p>
-              <input
-                {...otpForm.register('otp')}
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                placeholder="— — — — — —"
-                className="w-full border border-gray-300 rounded-xl px-4 py-3 text-center text-2xl tracking-widest focus:outline-none focus:ring-2 focus:ring-gray-900"
-              />
-              {otpExpiry > 0 && (
-                <p className="text-xs text-center text-gray-400">
-                  Code expires in {Math.floor(otpExpiry / 60)}:
-                  {String(otpExpiry % 60).padStart(2, '0')}
-                </p>
-              )}
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-gray-900 text-white rounded-xl py-3 text-sm font-medium disabled:opacity-50"
-              >
-                {loading ? 'Verifying…' : 'Verify OTP'}
-              </button>
-              <div className="flex justify-between text-sm text-gray-500">
-                <button type="button" onClick={() => setStep('otp_mobile')}>
-                  ← Change number
-                </button>
-                {otpExpiry === 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setStep('otp_mobile');
-                      mobileForm.setValue('mobile', mobile);
-                    }}
-                  >
-                    Resend OTP
-                  </button>
+          {/* Status history timeline */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <h2 className="text-white font-semibold text-sm mb-4">Status History</h2>
+            <div className="space-y-3">
+              {order.statusHistory.map((h, i) => (
+                <div key={i} className="flex items-center gap-3 text-sm">
+                  <div className="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0" />
+                  <span className="text-gray-300 capitalize flex-1">
+                    {h.status.replace('_', ' ')}
+                  </span>
+                  <span className="text-gray-500 text-xs">{formatDateTime(h.at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Right column */}
+        <div className="space-y-5">
+
+          {/* Customer */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <h2 className="text-white font-semibold text-sm mb-4">Customer</h2>
+            {order.customer ? (
+              <div className="space-y-2.5">
+                <div className="flex items-center gap-2 text-sm text-gray-300">
+                  <User size={14} className="text-gray-500" />
+                  {order.customer.isGuest ? (
+                    <span className="text-gray-500 italic">Guest</span>
+                  ) : (
+                    order.customer.name ?? <span className="text-gray-500 italic">Unnamed</span>
+                  )}
+                </div>
+                {order.customer.mobileNumber && (
+                  <div className="flex items-center gap-2 text-sm text-gray-400">
+                    <Phone size={14} className="text-gray-500" />
+                    {order.customer.mobileNumber}
+                  </div>
                 )}
               </div>
-            </form>
+            ) : (
+              <p className="text-gray-500 text-sm italic">No customer linked</p>
+            )}
+          </div>
+
+          {/* Payment */}
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+            <h2 className="text-white font-semibold text-sm mb-4">Payment</h2>
+            <div className="space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-400">Status</span>
+                <span className={`font-medium ${order.payment.status === 'paid' ? 'text-green-400' : 'text-amber-300'}`}>
+                  {order.payment.status}
+                </span>
+              </div>
+              {order.payment.method && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-400">Method</span>
+                  <span className="text-gray-300 uppercase">{order.payment.method}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-400">Total</span>
+                <span className="text-white font-bold">₹{Number(order.summary.total).toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          {!isTerminal && transitions.length > 0 && (
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5 space-y-2.5">
+              <h2 className="text-white font-semibold text-sm mb-3">Actions</h2>
+              {transitions.filter((t) => t !== 'cancelled').map((nextStatus) => (
+                <button
+                  key={nextStatus}
+                  onClick={() => handleTransition(nextStatus)}
+                  disabled={updating}
+                  className="w-full bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-white text-sm font-semibold py-2.5 rounded-xl transition"
+                >
+                  {updating
+                    ? <Loader2 size={14} className="animate-spin mx-auto" />
+                    : ACTION_LABEL[nextStatus] ?? nextStatus}
+                </button>
+              ))}
+              {transitions.includes('cancelled') && (
+                <button
+                  onClick={() => handleTransition('cancelled')}
+                  disabled={updating}
+                  className="w-full py-2.5 text-red-400 hover:bg-red-900/30 disabled:opacity-50 text-sm font-medium rounded-xl transition border border-red-900/40"
+                >
+                  Cancel Order
+                </button>
+              )}
+            </div>
+          )}
+
+          {isTerminal && (
+            <div className="bg-gray-900 border border-gray-800 rounded-2xl p-4 text-center">
+              <p className="text-gray-500 text-sm">
+                This order is <span className="text-gray-300 font-medium">{order.status}</span>.
+              </p>
+            </div>
           )}
         </div>
-      </main>
-    </>
-  );
-}
+      </div>
 
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
-      <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z" fill="#34A853"/>
-      <path d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
-      <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
-    </svg>
+      {/* Payment method modal */}
+      {showPaymentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-2xl p-6 w-80">
+            <h2 className="text-white font-bold text-base mb-4">Select Payment Method</h2>
+            <div className="grid grid-cols-2 gap-2 mb-6">
+              {(['cash', 'upi', 'card', 'other'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setPaymentMethod(m)}
+                  className={`py-2.5 rounded-xl text-sm font-medium border transition ${
+                    paymentMethod === m
+                      ? 'bg-amber-500 border-amber-500 text-white'
+                      : 'border-gray-700 text-gray-400 hover:border-gray-600'
+                  }`}
+                >
+                  {m.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowPaymentModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-gray-700 text-gray-400 text-sm hover:border-gray-600 transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => doTransition('paid', paymentMethod)}
+                disabled={updating}
+                className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-white text-sm font-semibold disabled:opacity-50 transition"
+              >
+                {updating ? 'Saving…' : 'Confirm Paid'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

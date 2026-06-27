@@ -3,12 +3,12 @@
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { ShoppingCart, Plus, Minus, Leaf, Drumstick, Egg } from 'lucide-react';
+import { ShoppingCart, Plus, Minus } from 'lucide-react';
 import { useCartStore } from '@/stores/cartStore';
 import { useRealtimeMenu } from '@/hooks/useRealtimeMenu';
 import type { FoodType } from '@/types/domain';
 
-// ─── Types (matching server page.tsx output) ──────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 interface Branding {
   primary_color: string;
   secondary_color: string;
@@ -49,21 +49,21 @@ interface Restaurant {
   branding: Branding | null;
 }
 
-// ─── Food type indicators ─────────────────────────────────────────────────────
+// ─── Food type indicator ──────────────────────────────────────────────────────
 function FoodTypeIndicator({ type }: { type: FoodType }) {
-  if (type === 'veg') return (
-    <span className="inline-flex items-center justify-center w-4 h-4 border-2 border-green-600 rounded-sm">
-      <span className="w-2 h-2 rounded-full bg-green-600" />
-    </span>
-  );
-  if (type === 'non_veg') return (
-    <span className="inline-flex items-center justify-center w-4 h-4 border-2 border-red-600 rounded-sm">
-      <span className="w-2 h-2 rounded-full bg-red-600" />
-    </span>
-  );
+  const colors: Record<FoodType, string> = {
+    veg:     'border-green-600',
+    non_veg: 'border-red-600',
+    egg:     'border-yellow-500',
+  };
+  const dotColors: Record<FoodType, string> = {
+    veg:     'bg-green-600',
+    non_veg: 'bg-red-600',
+    egg:     'bg-yellow-500',
+  };
   return (
-    <span className="inline-flex items-center justify-center w-4 h-4 border-2 border-yellow-500 rounded-sm">
-      <span className="w-2 h-2 rounded-full bg-yellow-500" />
+    <span className={`inline-flex items-center justify-center w-4 h-4 border-2 rounded-sm flex-shrink-0 ${colors[type]}`}>
+      <span className={`w-2 h-2 rounded-full ${dotColors[type]}`} />
     </span>
   );
 }
@@ -81,13 +81,22 @@ export default function MenuClient({
   const [cartOpen, setCartOpen] = useState(false);
   const [placingOrder, setPlacingOrder] = useState(false);
   const [activeCategory, setActiveCategory] = useState(initialCategories[0]?.id ?? '');
+  const [specialInstructions, setSpecialInstructions] = useState('');
 
-  const { items, addItem, removeItem, updateQuantity, totalItems, subtotal, restaurantId, setRestaurant } = useCartStore();
+  const {
+    items,
+    addItem,
+    updateQuantity,
+    totalItems,
+    subtotal,
+    restaurantId,
+    setRestaurant,
+  } = useCartStore();
 
-  // Set this restaurant in the cart store
+  // Sync restaurant into cart store
   if (restaurantId !== restaurant.id) setRestaurant(restaurant.id);
 
-  // Live availability changes via Supabase Realtime
+  // Live availability updates via Supabase Realtime
   useRealtimeMenu(
     restaurant.id,
     useCallback((change) => {
@@ -107,28 +116,45 @@ export default function MenuClient({
     }, []),
   );
 
-  // Cart quantity helpers
   const getQty = (id: string) => items.find((i) => i.menuItemId === id)?.quantity ?? 0;
 
   async function handlePlaceOrder() {
     if (items.length === 0) return;
     setPlacingOrder(true);
     try {
-      const tableId = ''; // TODO: read from session cookie via context or API
-      const res = await fetch('/api/orders', {
+      // Step 1: Validate cart and retrieve server-side tableId from session
+      const validateRes = await fetch('/api/cart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           restaurantId: restaurant.id,
-          tableId, // Will be filled from server session
           items: items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity })),
         }),
       });
-      const data = await res.json();
-      if (data.success) {
-        router.push(`/r/${restaurant.slug}/order/${data.data.orderId}`);
+      const validateData = await validateRes.json();
+      if (!validateData.success) {
+        toast.error(validateData.error?.message ?? 'Some items are no longer available');
+        setPlacingOrder(false);
+        return;
+      }
+
+      // Step 2: Place the order using the tableId returned from the session
+      const orderRes = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          restaurantId: restaurant.id,
+          tableId: validateData.data.tableId,
+          items: items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity })),
+          specialInstructions: specialInstructions.trim() || undefined,
+        }),
+      });
+      const orderData = await orderRes.json();
+      if (orderData.success) {
+        setCartOpen(false);
+        router.push(`/r/${restaurant.slug}/order/${orderData.data.orderId}`);
       } else {
-        toast.error(data.error?.message ?? 'Could not place order');
+        toast.error(orderData.error?.message ?? 'Could not place order');
       }
     } finally {
       setPlacingOrder(false);
@@ -137,22 +163,29 @@ export default function MenuClient({
 
   const taxAmount = Number((subtotal() * (restaurant.taxRate / 100)).toFixed(2));
   const total = Number((subtotal() + taxAmount).toFixed(2));
+  const primaryColor = restaurant.branding?.primary_color ?? '#000000';
+  const accentColor = restaurant.branding?.accent_color ?? '#f59e0b';
 
   return (
-    <div className="min-h-screen bg-white" style={{ fontFamily: restaurant.branding?.font_family ?? 'Inter' }}>
+    <div
+      className="min-h-screen bg-white"
+      style={{ fontFamily: restaurant.branding?.font_family ?? 'Inter' }}
+    >
       {/* Header */}
       <header
         className="sticky top-0 z-20 px-4 py-3 flex items-center justify-between shadow-sm"
-        style={{ backgroundColor: restaurant.branding?.primary_color ?? '#000' }}
+        style={{ backgroundColor: primaryColor }}
       >
         <div className="flex items-center gap-3">
           {restaurant.logoUrl && (
-            <img src={restaurant.logoUrl} alt={restaurant.name} className="h-8 w-8 rounded-full object-cover" />
+            <img
+              src={restaurant.logoUrl}
+              alt={restaurant.name}
+              className="h-8 w-8 rounded-full object-cover"
+            />
           )}
           <span className="text-white font-semibold text-sm">{restaurant.name}</span>
         </div>
-
-        {/* Cart button */}
         <button
           onClick={() => setCartOpen(true)}
           className="relative flex items-center gap-2 bg-white/20 text-white rounded-full px-3 py-1.5 text-sm"
@@ -161,7 +194,7 @@ export default function MenuClient({
           {totalItems() > 0 && (
             <span
               className="absolute -top-1 -right-1 w-5 h-5 rounded-full text-xs flex items-center justify-center text-white font-bold"
-              style={{ backgroundColor: restaurant.branding?.accent_color ?? '#f59e0b' }}
+              style={{ backgroundColor: accentColor }}
             >
               {totalItems()}
             </span>
@@ -179,12 +212,12 @@ export default function MenuClient({
                 setActiveCategory(cat.id);
                 document.getElementById(`cat-${cat.id}`)?.scrollIntoView({ behavior: 'smooth' });
               }}
-              className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition ${
+              className="px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition"
+              style={
                 activeCategory === cat.id
-                  ? 'text-white'
-                  : 'bg-gray-100 text-gray-600'
-              }`}
-              style={activeCategory === cat.id ? { backgroundColor: restaurant.branding?.primary_color ?? '#000' } : {}}
+                  ? { backgroundColor: primaryColor, color: '#fff' }
+                  : { backgroundColor: '#f3f4f6', color: '#4b5563' }
+              }
             >
               {cat.name}
             </button>
@@ -192,6 +225,7 @@ export default function MenuClient({
         </div>
       </div>
 
+      {/* Closed banner */}
       {!restaurant.isAcceptingOrders && (
         <div className="mx-4 mt-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
           This restaurant is not accepting orders right now.
@@ -211,22 +245,31 @@ export default function MenuClient({
                     key={item.id}
                     className={`flex gap-3 py-3 border-b border-gray-50 ${!item.is_available ? 'opacity-50' : ''}`}
                   >
-                    {/* Item info */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start gap-1.5 mb-1">
                         <FoodTypeIndicator type={item.food_type} />
-                        <span className="text-sm font-medium text-gray-900 leading-tight">{item.name}</span>
+                        <span className="text-sm font-medium text-gray-900 leading-tight">
+                          {item.name}
+                        </span>
                       </div>
                       {item.description && (
-                        <p className="text-xs text-gray-500 leading-snug mb-1 line-clamp-2">{item.description}</p>
+                        <p className="text-xs text-gray-500 leading-snug mb-1 line-clamp-2">
+                          {item.description}
+                        </p>
                       )}
-                      <p className="text-sm font-semibold text-gray-900">₹{item.price.toFixed(2)}</p>
+                      {item.allergens.length > 0 && (
+                        <p className="text-xs text-gray-400 mb-1">
+                          Contains: {item.allergens.join(', ')}
+                        </p>
+                      )}
+                      <p className="text-sm font-semibold text-gray-900">
+                        ₹{item.price.toFixed(2)}
+                      </p>
                       {!item.is_available && (
                         <span className="text-xs text-red-500 font-medium">Sold Out</span>
                       )}
                     </div>
 
-                    {/* Image + Add button */}
                     <div className="relative flex-shrink-0">
                       {item.image_url ? (
                         <img
@@ -238,7 +281,6 @@ export default function MenuClient({
                         <div className="w-24 h-20 bg-gray-100 rounded-xl" />
                       )}
 
-                      {/* Quantity control */}
                       {item.is_available && restaurant.isAcceptingOrders && (
                         <div className="absolute -bottom-2 left-1/2 -translate-x-1/2">
                           {qty === 0 ? (
@@ -253,22 +295,39 @@ export default function MenuClient({
                                 })
                               }
                               className="flex items-center gap-1 bg-white border-2 rounded-lg px-3 py-1 text-xs font-bold shadow-sm"
-                              style={{ borderColor: restaurant.branding?.primary_color ?? '#000', color: restaurant.branding?.primary_color ?? '#000' }}
+                              style={{ borderColor: primaryColor, color: primaryColor }}
                             >
                               <Plus size={12} /> ADD
                             </button>
                           ) : (
                             <div
                               className="flex items-center gap-2 bg-white border-2 rounded-lg px-2 py-1 shadow-sm"
-                              style={{ borderColor: restaurant.branding?.primary_color ?? '#000' }}
+                              style={{ borderColor: primaryColor }}
                             >
-                              <button onClick={() => updateQuantity(item.id, qty - 1)} className="text-gray-700">
+                              <button
+                                onClick={() => updateQuantity(item.id, qty - 1)}
+                                className="text-gray-700"
+                              >
                                 <Minus size={12} />
                               </button>
-                              <span className="text-xs font-bold w-4 text-center" style={{ color: restaurant.branding?.primary_color ?? '#000' }}>
+                              <span
+                                className="text-xs font-bold w-4 text-center"
+                                style={{ color: primaryColor }}
+                              >
                                 {qty}
                               </span>
-                              <button onClick={() => addItem({ menuItemId: item.id, name: item.name, price: item.price, food_type: item.food_type, image_url: item.image_url })} className="text-gray-700">
+                              <button
+                                onClick={() =>
+                                  addItem({
+                                    menuItemId: item.id,
+                                    name: item.name,
+                                    price: item.price,
+                                    food_type: item.food_type,
+                                    image_url: item.image_url,
+                                  })
+                                }
+                                className="text-gray-700"
+                              >
                                 <Plus size={12} />
                               </button>
                             </div>
@@ -290,9 +349,11 @@ export default function MenuClient({
           <button
             onClick={() => setCartOpen(true)}
             className="w-full flex items-center justify-between text-white rounded-xl px-4 py-3"
-            style={{ backgroundColor: restaurant.branding?.primary_color ?? '#000' }}
+            style={{ backgroundColor: primaryColor }}
           >
-            <span className="text-sm font-medium bg-white/20 rounded-lg px-2 py-0.5">{totalItems()} item{totalItems() !== 1 ? 's' : ''}</span>
+            <span className="text-sm font-medium bg-white/20 rounded-lg px-2 py-0.5">
+              {totalItems()} item{totalItems() !== 1 ? 's' : ''}
+            </span>
             <span className="text-sm font-semibold">View Cart</span>
             <span className="text-sm font-semibold">₹{subtotal().toFixed(2)}</span>
           </button>
@@ -302,47 +363,80 @@ export default function MenuClient({
       {/* Cart drawer */}
       {cartOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setCartOpen(false)} />
-          <div className="relative bg-white rounded-t-2xl max-h-[80vh] flex flex-col">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => setCartOpen(false)}
+          />
+          <div className="relative bg-white rounded-t-2xl max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between px-4 py-4 border-b border-gray-100">
               <h2 className="font-bold text-gray-900">Your Cart</h2>
-              <button onClick={() => setCartOpen(false)} className="text-gray-400 text-xl">✕</button>
+              <button onClick={() => setCartOpen(false)} className="text-gray-400 text-xl leading-none">
+                ✕
+              </button>
             </div>
+
             <div className="overflow-y-auto flex-1 px-4 py-2">
               {items.map((item) => (
                 <div key={item.menuItemId} className="flex items-center gap-3 py-3 border-b border-gray-50">
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-gray-900">{item.name}</p>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{item.name}</p>
                     <p className="text-xs text-gray-500">₹{item.price.toFixed(2)} each</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <button onClick={() => updateQuantity(item.menuItemId, item.quantity - 1)} className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center">
+                    <button
+                      onClick={() => updateQuantity(item.menuItemId, item.quantity - 1)}
+                      className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center"
+                    >
                       <Minus size={12} />
                     </button>
                     <span className="text-sm font-bold w-4 text-center">{item.quantity}</span>
-                    <button onClick={() => updateQuantity(item.menuItemId, item.quantity + 1)} className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center">
+                    <button
+                      onClick={() => updateQuantity(item.menuItemId, item.quantity + 1)}
+                      className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center"
+                    >
                       <Plus size={12} />
                     </button>
                   </div>
-                  <p className="text-sm font-semibold w-16 text-right">₹{(item.price * item.quantity).toFixed(2)}</p>
+                  <p className="text-sm font-semibold text-gray-900 w-16 text-right flex-shrink-0">
+                    ₹{(item.price * item.quantity).toFixed(2)}
+                  </p>
                 </div>
               ))}
+
+              {/* Special instructions */}
+              <div className="py-3">
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                  Special instructions <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <textarea
+                  value={specialInstructions}
+                  onChange={(e) => setSpecialInstructions(e.target.value)}
+                  maxLength={300}
+                  rows={2}
+                  placeholder="Allergies, less spice, extra sauce…"
+                  className="w-full text-sm text-gray-700 placeholder-gray-400 border border-gray-200 rounded-xl px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </div>
             </div>
+
             <div className="px-4 py-4 border-t border-gray-100 space-y-2">
               <div className="flex justify-between text-sm text-gray-600">
-                <span>Subtotal</span><span>₹{subtotal().toFixed(2)}</span>
+                <span>Subtotal</span>
+                <span>₹{subtotal().toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-sm text-gray-600">
-                <span>GST ({restaurant.taxRate}%)</span><span>₹{taxAmount.toFixed(2)}</span>
+                <span>GST ({restaurant.taxRate}%)</span>
+                <span>₹{taxAmount.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between text-base font-bold text-gray-900">
-                <span>Total</span><span>₹{total.toFixed(2)}</span>
+              <div className="flex justify-between text-base font-bold text-gray-900 pt-1 border-t border-gray-100">
+                <span>Total</span>
+                <span>₹{total.toFixed(2)}</span>
               </div>
               <button
                 onClick={handlePlaceOrder}
                 disabled={placingOrder}
-                className="w-full text-white rounded-xl py-3 text-sm font-semibold mt-2 disabled:opacity-50"
-                style={{ backgroundColor: restaurant.branding?.primary_color ?? '#000' }}
+                className="w-full text-white rounded-xl py-3 text-sm font-semibold mt-2 disabled:opacity-50 transition"
+                style={{ backgroundColor: primaryColor }}
               >
                 {placingOrder ? 'Placing order…' : `Place Order · ₹${total.toFixed(2)}`}
               </button>
